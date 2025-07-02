@@ -2,19 +2,15 @@ name: Daily Clover Sync
 
 on:
   schedule:
-    # Runs at 11:00 AM UTC daily (adjust for your timezone)
-    # For EST (UTC-5): 11 AM EST = 4 PM UTC = '0 16 * * *'
-    # For PST (UTC-8): 11 AM PST = 7 PM UTC = '0 19 * * *'
-    # For CST (UTC-6): 11 AM CST = 5 PM UTC = '0 17 * * *'
-    - cron: "0 16 * * *" # This is 11 AM EST, change as needed
-
+    # Runs at 11:00 AM EST daily (4:00 PM UTC)
+    - cron: "0 16 * * *"
   # Allows manual triggering from GitHub UI
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # Kill job if it takes longer than 15 minutes
+    timeout-minutes: 30 # Increased timeout for larger data sets
 
     steps:
       - name: 📥 Checkout code
@@ -31,15 +27,52 @@ jobs:
 
       - name: 🔄 Run Clover sync
         env:
+          # Zoho credentials
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+
+          # Plano merchant
+          PLANO_ID: ${{ secrets.PLANO_ID }}
+          PLANO_API_KEY: ${{ secrets.PLANO_API_KEY }}
+          PLANO_AIRTABLE_ID: ${{ secrets.PLANO_AIRTABLE_ID }}
+
+          # Prattville 1 merchant
+          PRATTVILLE_1_ID: ${{ secrets.PRATTVILLE_1_ID }}
+          PRATTVILLE_1_API_KEY: ${{ secrets.PRATTVILLE_1_API_KEY }}
+          PRATTVILLE_1_AIRTABLE_ID: ${{ secrets.PRATTVILLE_1_AIRTABLE_ID }}
+
+          # Wetumpka merchant
+          WETUMPKA_ID: ${{ secrets.WETUMPKA_ID }}
+          WETUMPKA_API_KEY: ${{ secrets.WETUMPKA_API_KEY }}
+          WETUMPKA_AIRTABLE_ID: ${{ secrets.WETUMPKA_AIRTABLE_ID }}
+
+          # Montgomery merchant
+          Montgomery_ID: ${{ secrets.MONTGOMERY_ID }}
+          Montgomery_API_KEY: ${{ secrets.MONTGOMERY_API_KEY }}
+          Montgomery_AIRTABLE_ID: ${{ secrets.MONTGOMERY_AIRTABLE_ID }}
+
+          # Clanton merchant
+          Clanton_ID: ${{ secrets.CLANTON_ID }}
+          Clanton_API_KEY: ${{ secrets.CLANTON_API_KEY }}
+          Clanton_AIRTABLE_ID: ${{ secrets.CLANTON_AIRTABLE_ID }}
+
+          # Prattville 2 merchant
+          Prattville_2_ID: ${{ secrets.PRATTVILLE_2_ID }}
+          Prattville_2_API_KEY: ${{ secrets.PRATTVILLE_2_API_KEY }}
+          Prattville_2_AIRTABLE_ID: ${{ secrets.PRATTVILLE_2_AIRTABLE_ID }}
+
+          # Wetumpka LLC merchant
+          WETUMPKA_LLC_ID: ${{ secrets.WETUMPKA_LLC_ID }}
+          WETUMPKA_LLC_API_KEY: ${{ secrets.WETUMPKA_LLC_API_KEY }}
+          WETUMPKA_LLC_AIRTABLE_ID: ${{ secrets.WETUMPKA_LLC_AIRTABLE_ID }}
+
         run: |
           echo "🚀 Starting Clover sync at $(date)"
           node clover-sync.js
           echo "✅ Sync completed at $(date)"
 
-      - name: 📄 Save logs and data files
+      - name: 📊 Upload sync results
         if: always()
         uses: actions/upload-artifact@v4
         with:
