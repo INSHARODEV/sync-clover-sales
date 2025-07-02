@@ -69,7 +69,7 @@ jobs:
 
         run: |
           echo "🚀 Starting Clover sync at $(date)"
-          node clover-sync.js
+          node clover-sync.cjs
           echo "✅ Sync completed at $(date)"
 
       - name: 📊 Upload sync results
