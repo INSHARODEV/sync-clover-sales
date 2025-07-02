@@ -6,7 +6,16 @@ let accessToken;
 let ordersTruncationPerformed = false; // Track truncation for orders
 let lineItemsTruncationPerformed = false;
 let itemsTruncationPerformed = false;
+
+const RATE_LIMIT_CONFIG = {
+  maxRetries: 5,
+  baseDelay: 2000, // 2 seconds
+  maxDelay: 300000, // 5 minutes
+  requestDelay: 1000, // 1 second between requests
+};
+
 console.log("process.env.PLANO_ID", process.env.PLANO_ID);
+
 // List of merchants
 const merchants = [
   {
@@ -67,13 +76,66 @@ const formatTimestampWithOffset = (hours, timestamp) => {
   ).padStart(2, "0")}`;
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Enhanced retry mechanism with exponential backoff
+const retryWithBackoff = async (
+  fn,
+  maxRetries = RATE_LIMIT_CONFIG.maxRetries
+) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      // Check if it's a rate limit error
+      const isRateLimit =
+        error.message.includes("EXCEEDING_USR_PLN_API_FREQ_COUNT") ||
+        error.message.includes("429") ||
+        error.message.includes("rate limit");
+
+      if (!isRateLimit || attempt === maxRetries) {
+        throw error;
+      }
+
+      // Calculate delay with exponential backoff
+      const delay = Math.min(
+        RATE_LIMIT_CONFIG.baseDelay * Math.pow(2, attempt - 1),
+        RATE_LIMIT_CONFIG.maxDelay
+      );
+
+      console.log(
+        `⏳ Rate limit hit. Retrying in ${
+          delay / 1000
+        } seconds (attempt ${attempt}/${maxRetries})...`
+      );
+      await sleep(delay);
+    }
+  }
+};
+
 async function sendDataInChunks(data, viewId, type) {
-  const chunkSize = 1000;
+  const chunkSize = 500; // Reduced chunk size to be more conservative
   const totalChunks = Math.ceil(data.length / chunkSize);
+
   for (let i = 0; i < totalChunks; i++) {
     const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
-    console.log(`Sending chunk ${i + 1} of ${totalChunks}`);
-    await sendBulkDataToZoho(chunk, viewId, type);
+    console.log(
+      `Sending chunk ${i + 1} of ${totalChunks} (${chunk.length} records)`
+    );
+
+    await retryWithBackoff(async () => {
+      await sendBulkDataToZoho(chunk, viewId, type);
+    });
+
+    // Add delay between chunks to avoid rate limiting
+    if (i < totalChunks - 1) {
+      console.log(
+        `⏳ Waiting ${
+          RATE_LIMIT_CONFIG.requestDelay / 1000
+        } seconds before next chunk...`
+      );
+      await sleep(RATE_LIMIT_CONFIG.requestDelay);
+    }
   }
 }
 
@@ -346,12 +408,18 @@ const syncCloverToJSON = async () => {
     console.log("🔄 Starting sync process...");
     accessToken = await getAccessToken();
 
+    // Process items with rate limiting
+    console.log("📦 Fetching items...");
     const allItemsArrays = await Promise.all(
       merchants.map((m) => fetchAllItems(m.merchantID, m.merchantApiKey))
     );
     const allItems = allItemsArrays.flat();
     console.log(`📦 Found ${allItems.length} items total`);
-    await sendDataInChunks(allItems, "2972852000000458053", "items");
+
+    if (allItems.length > 0) {
+      await sendDataInChunks(allItems, "2972852000000458053", "items");
+      console.log("✅ Items sync completed");
+    }
 
     let allOrdersData = [];
     let allLineItemsData = [];
@@ -394,14 +462,19 @@ const syncCloverToJSON = async () => {
     console.log(`📊 Total line items: ${allLineItemsData.length}`);
 
     if (allOrdersData.length > 0) {
+      console.log("📊 Syncing orders...");
       await sendDataInChunks(allOrdersData, "2972852000000094331", "orders");
+      console.log("✅ Orders sync completed");
     }
+
     if (allLineItemsData.length > 0) {
+      console.log("📊 Syncing line items...");
       await sendDataInChunks(
         allLineItemsData,
         "2972852000000094053",
         "lineItems"
       );
+      console.log("✅ Line items sync completed");
     }
 
     console.log("✅ Sync completed successfully!");
@@ -505,16 +578,18 @@ async function sendBulkDataToZoho(data, viewId, type) {
     }
 
     const result = await response.json();
-    console.log("Bulk data imported successfully:", result);
+    console.log(
+      `✅ Bulk data imported successfully for ${type}:`,
+      result.summary || "Success"
+    );
 
     if (type === "items") itemsTruncationPerformed = true;
     if (type === "orders") ordersTruncationPerformed = true;
     if (type === "lineItems") lineItemsTruncationPerformed = true;
   } catch (error) {
     console.error(
-      "Error sending bulk data to Zoho:",
-      error.message,
-      error.stack
+      `❌ Error sending bulk data to Zoho for ${type}:`,
+      error.message
     );
     throw error;
   }
