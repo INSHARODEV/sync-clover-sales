@@ -2,6 +2,9 @@
 
 require("dotenv").config();
 
+// const fetch = require("node-fetch");
+// const https = require("https");
+
 let accessToken;
 let ordersTruncationPerformed = false; // Track truncation for orders
 let lineItemsTruncationPerformed = false;
@@ -9,9 +12,9 @@ let itemsTruncationPerformed = false;
 
 const RATE_LIMIT_CONFIG = {
   maxRetries: 5,
-  baseDelay: 2000, // 2 seconds
-  maxDelay: 300000, // 5 minutes
-  requestDelay: 1000, // 1 second between requests
+  baseDelay: 2000,
+  maxDelay: 300000,
+  requestDelay: 3000,
 };
 
 console.log("process.env.PLANO_ID", process.env.PLANO_ID);
@@ -54,6 +57,13 @@ const merchants = [
     merchantIDAirtable: process.env.WETUMPKA_LLC_AIRTABLE_ID,
   },
 ];
+
+// const agent = new https.Agent({
+//   keepAlive: true,
+//   maxSockets: 5,
+//   timeout: 60000,
+//   keepAliveMsecs: 30000,
+// });
 
 // Constants for time calculations
 const currentTimeTimestamp = Date.now();
@@ -114,7 +124,7 @@ const retryWithBackoff = async (
 };
 
 async function sendDataInChunks(data, viewId, type) {
-  const chunkSize = 500; // Reduced chunk size to be more conservative
+  const chunkSize = 100;
   const totalChunks = Math.ceil(data.length / chunkSize);
 
   for (let i = 0; i < totalChunks; i++) {
@@ -528,11 +538,16 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
   return allItems;
 };
 
-async function sendBulkDataToZoho(data, viewId, type) {
+async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
+  const MAX_RETRIES = 3;
+  const TIMEOUT_MS = 60000;
+
   if (!accessToken) {
     accessToken = await getAccessToken();
-    console.error("No access token available. Skipping data sync.");
-    return;
+    if (!accessToken) {
+      console.error("No access token available. Skipping data sync.");
+      return;
+    }
   }
 
   const workspaceId = "2972852000000024001";
@@ -552,7 +567,8 @@ async function sendBulkDataToZoho(data, viewId, type) {
   const urlWithConfig = `${baseUrl}?CONFIG=${encodedConfig}`;
 
   const boundary =
-    "----WebKitFormBoundary" + Math.random().toString(16).substr(2);
+    "----WebKitFormBoundary" + Math.random().toString(16).slice(2);
+
   let multipartBody = "";
   multipartBody += `--${boundary}\r\n`;
   multipartBody += `Content-Disposition: form-data; name="DATA"\r\n\r\n`;
@@ -560,15 +576,20 @@ async function sendBulkDataToZoho(data, viewId, type) {
   multipartBody += `--${boundary}--\r\n`;
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const response = await fetch(urlWithConfig, {
       method: "POST",
+      // agent: agent,
       headers: {
         Authorization: `Zoho-oauthtoken ${accessToken}`,
         "ZANALYTICS-ORGID": orgId,
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
       body: multipartBody,
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -591,6 +612,28 @@ async function sendBulkDataToZoho(data, viewId, type) {
       `❌ Error sending bulk data to Zoho for ${type}:`,
       error.message
     );
+
+    // Retry logic for network errors
+    if (
+      retryCount < MAX_RETRIES &&
+      (error.code === "UND_ERR_SOCKET" ||
+        error.code === "ECONNRESET" ||
+        error.code === "ETIMEDOUT" ||
+        error.name === "AbortError" ||
+        error.message.includes("fetch failed") ||
+        error.message.includes("socket hang up"))
+    ) {
+      const backoffDelay = Math.pow(2, retryCount) * 2000;
+      console.log(
+        `🔄 Retrying due to network error in ${backoffDelay}ms... (attempt ${
+          retryCount + 1
+        }/${MAX_RETRIES})`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+      return sendBulkDataToZoho(data, viewId, type, retryCount + 1);
+    }
+
     throw error;
   }
 }
