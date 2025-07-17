@@ -12,9 +12,9 @@ let itemsTruncationPerformed = false;
 
 const RATE_LIMIT_CONFIG = {
   maxRetries: 5,
-  // baseDelay: 2000,
-  // maxDelay: 300000,
-  // requestDelay: 3000,
+  baseDelay: 1000,
+  maxDelay: 60000,
+  requestDelay: 1000,
 };
 
 console.log("process.env.PLANO_ID", process.env.PLANO_ID);
@@ -166,7 +166,7 @@ const formatAmount = (amount) => (amount ? amount / 100 : 0);
 const fetchOrders = async (merchantID, merchantApiKey, urlType, hours) => {
   let offset = 0;
   let allOrders = [];
-  const limit = 1000;
+  const limit = 500;
 
   const getUrl = () => {
     if (urlType === "first") {
@@ -600,6 +600,27 @@ async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
       error.message,
       error.stack
     );
+
+    // Retry logic for network errors
+    if (
+      retryCount < MAX_RETRIES &&
+      (error.code === "UND_ERR_SOCKET" ||
+        error.code === "ECONNRESET" ||
+        error.code === "ETIMEDOUT" ||
+        error.name === "AbortError" ||
+        error.message.includes("fetch failed") ||
+        error.message.includes("socket hang up"))
+    ) {
+      const backoffDelay = Math.pow(2, retryCount) * 2000;
+      console.log(
+        `🔄 Retrying due to network error in ${backoffDelay}ms... (attempt ${
+          retryCount + 1
+        }/${MAX_RETRIES})`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+      return sendBulkDataToZoho(data, viewId, type, retryCount + 1);
+    }
     throw error;
   }
 }
