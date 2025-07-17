@@ -12,12 +12,10 @@ let itemsTruncationPerformed = false;
 
 const RATE_LIMIT_CONFIG = {
   maxRetries: 5,
-  baseDelay: 1000,
-  maxDelay: 60000,
+  baseDelay: 2000,
+  maxDelay: 300000,
   requestDelay: 1000,
 };
-
-console.log("process.env.PLANO_ID", process.env.PLANO_ID);
 
 // List of merchants
 const merchants = [
@@ -107,18 +105,18 @@ const retryWithBackoff = async (
         throw error;
       }
 
-      // // Calculate delay with exponential backoff
-      // const delay = Math.min(
-      //   RATE_LIMIT_CONFIG.baseDelay * Math.pow(2, attempt - 1),
-      //   RATE_LIMIT_CONFIG.maxDelay
-      // );
+      // Calculate delay with exponential backoff
+      const delay = Math.min(
+        RATE_LIMIT_CONFIG.baseDelay * Math.pow(2, attempt - 1),
+        RATE_LIMIT_CONFIG.maxDelay
+      );
 
-      // console.log(
-      //   `⏳ Rate limit hit. Retrying in ${
-      //     delay / 1000
-      //   } seconds (attempt ${attempt}/${maxRetries})...`
-      // );
-      // await sleep(delay);
+      console.log(
+        `⏳ Rate limit hit. Retrying in ${
+          delay / 1000
+        } seconds (attempt ${attempt}/${maxRetries})...`
+      );
+      await sleep(delay);
     }
   }
 };
@@ -135,15 +133,15 @@ async function sendDataInChunks(data, viewId, type) {
       await sendBulkDataToZoho(chunk, viewId, type);
     });
 
-    // // Add delay between chunks to avoid rate limiting
-    // if (i < totalChunks - 1) {
-    //   console.log(
-    //     `⏳ Waiting ${
-    //       RATE_LIMIT_CONFIG.requestDelay / 1000
-    //     } seconds before next chunk...`
-    //   );
-    //   await sleep(RATE_LIMIT_CONFIG.requestDelay);
-    // }
+    // Add delay between chunks to avoid rate limiting
+    if (i < totalChunks - 1) {
+      console.log(
+        `⏳ Waiting ${
+          RATE_LIMIT_CONFIG.requestDelay / 1000
+        } seconds before next chunk...`
+      );
+      await sleep(RATE_LIMIT_CONFIG.requestDelay);
+    }
   }
 }
 
@@ -529,16 +527,11 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
   return allItems;
 };
 
-async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
-  const MAX_RETRIES = 3;
-  const TIMEOUT_MS = 60000;
-
+async function sendBulkDataToZoho(data, viewId, type) {
   if (!accessToken) {
     accessToken = await getAccessToken();
-    if (!accessToken) {
-      console.error("No access token available. Skipping data sync.");
-      return;
-    }
+    console.error("No access token available. Skipping data sync.");
+    return;
   }
 
   const workspaceId = "2972852000000024001";
@@ -589,38 +582,19 @@ async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
     }
 
     const result = await response.json();
-    console.log("Bulk data imported successfully:", result);
+    console.log(
+      `✅ Bulk data imported successfully for ${type}:`,
+      result.summary || "Success"
+    );
 
     if (type === "items") itemsTruncationPerformed = true;
     if (type === "orders") ordersTruncationPerformed = true;
     if (type === "lineItems") lineItemsTruncationPerformed = true;
   } catch (error) {
     console.error(
-      "Error sending bulk data to Zoho:",
-      error.message,
-      error.stack
+      `❌ Error sending bulk data to Zoho for ${type}:`,
+      error.message
     );
-
-    // Retry logic for network errors
-    if (
-      retryCount < MAX_RETRIES &&
-      (error.code === "UND_ERR_SOCKET" ||
-        error.code === "ECONNRESET" ||
-        error.code === "ETIMEDOUT" ||
-        error.name === "AbortError" ||
-        error.message.includes("fetch failed") ||
-        error.message.includes("socket hang up"))
-    ) {
-      const backoffDelay = Math.pow(2, retryCount) * 2000;
-      console.log(
-        `🔄 Retrying due to network error in ${backoffDelay}ms... (attempt ${
-          retryCount + 1
-        }/${MAX_RETRIES})`
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-      return sendBulkDataToZoho(data, viewId, type, retryCount + 1);
-    }
     throw error;
   }
 }
