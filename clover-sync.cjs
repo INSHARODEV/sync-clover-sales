@@ -566,8 +566,8 @@ async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
   multipartBody += `--${boundary}--\r\n`;
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    // const controller = new AbortController();
+    // const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const response = await fetch(urlWithConfig, {
       method: "POST",
       // agent: agent,
@@ -577,9 +577,9 @@ async function sendBulkDataToZoho(data, viewId, type, retryCount = 0) {
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
       body: multipartBody,
-      signal: controller.signal,
+      // signal: controller.signal,
     });
-    clearTimeout(timeoutId);
+    // clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
