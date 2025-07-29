@@ -512,8 +512,10 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
             ? item.categories.elements[0].name
             : null;
 
+        const { categories, ...itemWithoutCategories } = item;
+
         return {
-          ...item,
+          ...itemWithoutCategories,
           modifiedTime: formatTimestampWithOffset(0, item.modifiedTime),
           price: formatAmount(item.price),
           cost: formatAmount(item.cost),
