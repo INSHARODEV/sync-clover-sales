@@ -490,7 +490,7 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
 
   while (true) {
     try {
-      const url = `https://api.clover.com/v3/merchants/${merchantID}/items?limit=${limit}&offset=${offset}`;
+      const url = `https://api.clover.com/v3/merchants/${merchantID}/items?limit=${limit}&offset=${offset}&expand=categories`;
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -507,11 +507,17 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
       if (!data?.elements?.length) break;
 
       const itemsWithMerchantID = data.elements.map((item) => {
+        const firstCategoryName =
+          item.categories?.elements?.length > 0
+            ? item.categories.elements[0].name
+            : null;
+
         return {
           ...item,
           modifiedTime: formatTimestampWithOffset(0, item.modifiedTime),
           price: formatAmount(item.price),
           cost: formatAmount(item.cost),
+          categoryName: firstCategoryName,
           merchantID,
         };
       });
