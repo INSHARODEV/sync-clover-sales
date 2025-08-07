@@ -2,19 +2,19 @@
 
 require("dotenv").config();
 
-// const fetch = require("node-fetch");
-// const https = require("https");
-
 let accessToken;
-let ordersTruncationPerformed = false; // Track truncation for orders
+let ordersTruncationPerformed = false;
 let lineItemsTruncationPerformed = false;
 let itemsTruncationPerformed = false;
 
 const RATE_LIMIT_CONFIG = {
-  maxRetries: 5,
-  baseDelay: 2000,
-  maxDelay: 300000,
-  requestDelay: 1000,
+  maxRetries: 7, // Increased retries
+  baseDelay: 3000, // Increased base delay
+  maxDelay: 600000, // Increased max delay to 10 minutes
+  requestDelay: 2000, // Increased delay between requests
+  chunkSize: 250, // Reduced chunk size
+  connectionTimeout: 120000, // 2 minutes
+  socketTimeout: 180000, // 3 minutes
 };
 
 // List of merchants
@@ -56,13 +56,6 @@ const merchants = [
   },
 ];
 
-// const agent = new https.Agent({
-//   keepAlive: true,
-//   maxSockets: 5,
-//   timeout: 60000,
-//   keepAliveMsecs: 30000,
-// });
-
 // Constants for time calculations
 const currentTimeTimestamp = Date.now();
 const threeMonthsAgoTimestamp = currentTimeTimestamp - 90 * 24 * 60 * 60 * 1000;
@@ -86,63 +79,209 @@ const formatTimestampWithOffset = (hours, timestamp) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Enhanced retry mechanism with exponential backoff
+// Enhanced error classification
+const classifyError = (error) => {
+  const errorMessage = error.message.toLowerCase();
+
+  if (
+    errorMessage.includes("exceeding_usr_pln_api_freq_count") ||
+    errorMessage.includes("429") ||
+    errorMessage.includes("rate limit")
+  ) {
+    return "RATE_LIMIT";
+  }
+
+  if (
+    errorMessage.includes("socket") ||
+    errorMessage.includes("timeout") ||
+    errorMessage.includes("econnreset") ||
+    errorMessage.includes("other side closed") ||
+    errorMessage.includes("fetch failed")
+  ) {
+    return "CONNECTION";
+  }
+
+  if (
+    errorMessage.includes("500") ||
+    errorMessage.includes("502") ||
+    errorMessage.includes("503") ||
+    errorMessage.includes("504")
+  ) {
+    return "SERVER_ERROR";
+  }
+
+  return "OTHER";
+};
+
+// Enhanced retry mechanism with better error handling
 const retryWithBackoff = async (
   fn,
-  maxRetries = RATE_LIMIT_CONFIG.maxRetries
+  maxRetries = RATE_LIMIT_CONFIG.maxRetries,
+  context = ""
 ) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      // Check if it's a rate limit error
-      const isRateLimit =
-        error.message.includes("EXCEEDING_USR_PLN_API_FREQ_COUNT") ||
-        error.message.includes("429") ||
-        error.message.includes("rate limit");
+      const errorType = classifyError(error);
 
-      if (!isRateLimit || attempt === maxRetries) {
+      console.log(
+        `❌ ${context} - Attempt ${attempt}/${maxRetries} failed:`,
+        error.message
+      );
+
+      // Don't retry on certain errors on final attempt
+      if (attempt === maxRetries) {
+        console.log(`💀 ${context} - All retry attempts exhausted`);
         throw error;
       }
 
-      // Calculate delay with exponential backoff
-      const delay = Math.min(
-        RATE_LIMIT_CONFIG.baseDelay * Math.pow(2, attempt - 1),
-        RATE_LIMIT_CONFIG.maxDelay
-      );
+      // Handle different error types
+      let shouldRetry = false;
+      let delay = RATE_LIMIT_CONFIG.baseDelay;
 
-      console.log(
-        `⏳ Rate limit hit. Retrying in ${
-          delay / 1000
-        } seconds (attempt ${attempt}/${maxRetries})...`
-      );
+      switch (errorType) {
+        case "RATE_LIMIT":
+          shouldRetry = true;
+          delay = Math.min(
+            RATE_LIMIT_CONFIG.baseDelay * Math.pow(2, attempt - 1),
+            RATE_LIMIT_CONFIG.maxDelay
+          );
+          console.log(
+            `⏳ Rate limit detected. Backing off for ${delay / 1000} seconds...`
+          );
+          break;
+
+        case "CONNECTION":
+        case "SERVER_ERROR":
+          shouldRetry = true;
+          delay = Math.min(
+            RATE_LIMIT_CONFIG.baseDelay * Math.pow(1.5, attempt - 1),
+            RATE_LIMIT_CONFIG.maxDelay
+          );
+          console.log(
+            `🔌 Connection/Server error. Retrying in ${delay / 1000} seconds...`
+          );
+          break;
+
+        default:
+          // For unknown errors, try a few times with shorter delays
+          if (attempt <= 3) {
+            shouldRetry = true;
+            delay = RATE_LIMIT_CONFIG.baseDelay;
+            console.log(
+              `❓ Unknown error. Retrying in ${delay / 1000} seconds...`
+            );
+          }
+      }
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
       await sleep(delay);
+
+      // Refresh access token on connection errors after a few attempts
+      if (errorType === "CONNECTION" && attempt >= 3) {
+        console.log("🔄 Refreshing access token due to connection issues...");
+        try {
+          accessToken = await getAccessToken();
+        } catch (tokenError) {
+          console.log(
+            "⚠️ Failed to refresh token, continuing with existing token"
+          );
+        }
+      }
     }
   }
 };
 
+// Enhanced sendDataInChunks with adaptive chunk sizing
 async function sendDataInChunks(data, viewId, type) {
-  const chunkSize = 500;
+  let chunkSize = RATE_LIMIT_CONFIG.chunkSize;
+  let consecutiveFailures = 0;
   const totalChunks = Math.ceil(data.length / chunkSize);
 
-  for (let i = 0; i < totalChunks; i++) {
-    const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);
-    console.log(`Sending chunk ${i + 1} of ${totalChunks}`);
+  console.log(
+    `📦 Sending ${data.length} ${type} records in ${totalChunks} chunks of ${chunkSize}`
+  );
 
-    await retryWithBackoff(async () => {
-      await sendBulkDataToZoho(chunk, viewId, type);
-    });
+  for (let i = 0; i < data.length; i += chunkSize) {
+    const chunkIndex = Math.floor(i / chunkSize) + 1;
+    const chunk = data.slice(i, i + chunkSize);
 
-    // Add delay between chunks to avoid rate limiting
-    if (i < totalChunks - 1) {
-      console.log(
-        `⏳ Waiting ${
-          RATE_LIMIT_CONFIG.requestDelay / 1000
-        } seconds before next chunk...`
+    console.log(
+      `📤 Sending chunk ${chunkIndex}/${Math.ceil(data.length / chunkSize)} (${
+        chunk.length
+      } records)`
+    );
+
+    try {
+      await retryWithBackoff(
+        async () => {
+          await sendBulkDataToZoho(chunk, viewId, type);
+        },
+        RATE_LIMIT_CONFIG.maxRetries,
+        `${type} chunk ${chunkIndex}`
       );
-      await sleep(RATE_LIMIT_CONFIG.requestDelay);
+
+      consecutiveFailures = 0;
+      console.log(`✅ Chunk ${chunkIndex} completed successfully`);
+    } catch (error) {
+      consecutiveFailures++;
+      console.error(
+        `❌ Chunk ${chunkIndex} failed permanently:`,
+        error.message
+      );
+
+      // Adaptive strategy: reduce chunk size if we're having consistent issues
+      if (consecutiveFailures >= 2 && chunkSize > 50) {
+        const newChunkSize = Math.max(50, Math.floor(chunkSize * 0.7));
+        console.log(
+          `📉 Reducing chunk size from ${chunkSize} to ${newChunkSize} due to failures`
+        );
+        chunkSize = newChunkSize;
+
+        // Recalculate chunks with new size
+        const remainingData = data.slice(i);
+        return await sendDataInChunks(remainingData, viewId, type);
+      }
+
+      // If it's a critical chunk, we might want to continue or fail
+      const shouldContinue = await handleChunkFailure(error, chunkIndex, type);
+      if (!shouldContinue) {
+        throw error;
+      }
+    }
+
+    // Progressive delay between chunks based on success/failure
+    if (i + chunkSize < data.length) {
+      const delay =
+        consecutiveFailures > 0
+          ? RATE_LIMIT_CONFIG.requestDelay * 2
+          : RATE_LIMIT_CONFIG.requestDelay;
+
+      console.log(`⏳ Waiting ${delay / 1000} seconds before next chunk...`);
+      await sleep(delay);
     }
   }
+}
+
+// Handle chunk failures with user-defined strategy
+async function handleChunkFailure(error, chunkIndex, type) {
+  const errorType = classifyError(error);
+
+  // For certain errors, continue processing other chunks
+  if (errorType === "CONNECTION" || errorType === "SERVER_ERROR") {
+    console.log(
+      `⚠️ Continuing with remaining chunks despite chunk ${chunkIndex} failure`
+    );
+    return true;
+  }
+
+  // For rate limits or unknown errors, stop processing
+  console.log(`🛑 Stopping processing due to chunk ${chunkIndex} failure`);
+  return false;
 }
 
 function getImportType(type) {
@@ -160,7 +299,7 @@ function getImportType(type) {
 
 const formatAmount = (amount) => (amount ? amount / 100 : 0);
 
-// Fetch Orders from Clover API
+// Fetch Orders from Clover API with better error handling
 const fetchOrders = async (merchantID, merchantApiKey, urlType, hours) => {
   let offset = 0;
   let allOrders = [];
@@ -179,17 +318,25 @@ const fetchOrders = async (merchantID, merchantApiKey, urlType, hours) => {
 
   while (true) {
     try {
-      const response = await fetch(getUrl(), {
-        method: "GET",
-        headers: {
-          accept: "application/json",
-          Authorization: `Bearer ${merchantApiKey}`,
-        },
-      });
+      const response = await retryWithBackoff(
+        async () => {
+          const res = await fetch(getUrl(), {
+            method: "GET",
+            headers: {
+              accept: "application/json",
+              Authorization: `Bearer ${merchantApiKey}`,
+            },
+          });
 
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
-      }
+          if (!res.ok) {
+            throw new Error(`API request failed with status ${res.status}`);
+          }
+
+          return res;
+        },
+        3,
+        `Clover API - ${merchantID} ${urlType}`
+      );
 
       const data = await response.json();
       if (!data?.elements?.length) break;
@@ -216,8 +363,14 @@ const fetchOrders = async (merchantID, merchantApiKey, urlType, hours) => {
 
       allOrders = allOrders.concat(modifiedOrders);
       offset += limit;
+
+      // Small delay between API calls to avoid overwhelming the server
+      await sleep(100);
     } catch (error) {
-      console.error(`Error fetching orders for merchant ${merchantID}:`, error);
+      console.error(
+        `❌ Error fetching orders for merchant ${merchantID}:`,
+        error.message
+      );
       break;
     }
   }
@@ -225,7 +378,7 @@ const fetchOrders = async (merchantID, merchantApiKey, urlType, hours) => {
   return allOrders;
 };
 
-// Process Orders Data
+// Process Orders Data (unchanged)
 const processOrdersData = (orders, hours) => {
   const ordersData = [];
   const lineItemsData = [];
@@ -452,7 +605,7 @@ const syncCloverToJSON = async () => {
         } catch (error) {
           console.error(
             `❌ Error processing orders for merchant ${merchant.merchantID}:`,
-            error
+            error.message
           );
         }
       }
@@ -478,7 +631,8 @@ const syncCloverToJSON = async () => {
 
     console.log("✅ Sync completed successfully!");
   } catch (error) {
-    console.error("❌ Sync failed:", error);
+    console.error("❌ Sync failed:", error.message);
+    console.error("Stack trace:", error.stack);
     process.exit(1);
   }
 };
@@ -491,17 +645,26 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
   while (true) {
     try {
       const url = `https://api.clover.com/v3/merchants/${merchantID}/items?limit=${limit}&offset=${offset}&expand=categories`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          accept: "application/json",
-          Authorization: `Bearer ${merchantApiKey}`,
-        },
-      });
 
-      if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
-      }
+      const response = await retryWithBackoff(
+        async () => {
+          const res = await fetch(url, {
+            method: "GET",
+            headers: {
+              accept: "application/json",
+              Authorization: `Bearer ${merchantApiKey}`,
+            },
+          });
+
+          if (!res.ok) {
+            throw new Error(`API request failed with status ${res.status}`);
+          }
+
+          return res;
+        },
+        3,
+        `Items API - ${merchantID}`
+      );
 
       const data = await response.json();
       if (!data?.elements?.length) break;
@@ -526,8 +689,14 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
 
       allItems = allItems.concat(itemsWithMerchantID);
       offset += limit;
+
+      // Small delay between API calls
+      await sleep(100);
     } catch (error) {
-      console.error(`Error fetching items for merchant ${merchantID}:`, error);
+      console.error(
+        `❌ Error fetching items for merchant ${merchantID}:`,
+        error.message
+      );
       break;
     }
   }
@@ -535,11 +704,11 @@ const fetchAllItems = async (merchantID, merchantApiKey) => {
   return allItems;
 };
 
+// Enhanced sendBulkDataToZoho with better connection handling
 async function sendBulkDataToZoho(data, viewId, type) {
   if (!accessToken) {
+    console.error("No access token available. Attempting to get new token...");
     accessToken = await getAccessToken();
-    console.error("No access token available. Skipping data sync.");
-    return;
   }
 
   const workspaceId = "2972852000000024001";
@@ -567,20 +736,25 @@ async function sendBulkDataToZoho(data, viewId, type) {
   multipartBody += `--${boundary}--\r\n`;
 
   try {
-    // const controller = new AbortController();
-    // const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log("⏰ Request timeout, aborting...");
+      controller.abort();
+    }, RATE_LIMIT_CONFIG.connectionTimeout);
+
     const response = await fetch(urlWithConfig, {
       method: "POST",
-      // agent: agent,
       headers: {
         Authorization: `Zoho-oauthtoken ${accessToken}`,
         "ZANALYTICS-ORGID": orgId,
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        Connection: "keep-alive",
       },
       body: multipartBody,
-      // signal: controller.signal,
+      signal: controller.signal,
     });
-    // clearTimeout(timeoutId);
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -599,10 +773,20 @@ async function sendBulkDataToZoho(data, viewId, type) {
     if (type === "orders") ordersTruncationPerformed = true;
     if (type === "lineItems") lineItemsTruncationPerformed = true;
   } catch (error) {
-    console.error(
-      `❌ Error sending bulk data to Zoho for ${type}:`,
-      error.message
-    );
+    // Enhanced error logging
+    if (error.name === "AbortError") {
+      throw new Error(
+        `Request timeout after ${
+          RATE_LIMIT_CONFIG.connectionTimeout / 1000
+        }s for ${type}`
+      );
+    }
+
+    console.error(`❌ Error details for ${type}:`);
+    console.error(`   Message: ${error.message}`);
+    console.error(`   Type: ${error.name}`);
+    console.error(`   Code: ${error.code}`);
+
     throw error;
   }
 }
