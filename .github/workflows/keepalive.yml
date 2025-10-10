@@ -1,0 +1,56 @@
+name: KeepAlive
+
+# Allows the workflow to push a commit (only this workflow; repo default can stay read-only)
+permissions:
+  contents: write
+
+on:
+  schedule:
+    # Run on the 1st and 15th at 00:00 UTC (well inside the 60-day window)
+    - cron: "0 0 1,15 * *"
+  workflow_dispatch:
+
+jobs:
+  keep_alive:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: keepalive
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          # Optional: use a dedicated branch for keepalive commits
+          # ref: keepalive
+          fetch-depth: 0
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create empty commit (skip other CI)
+        run: |
+          # If you used a dedicated branch, ensure you're on it:
+          # git checkout keepalive
+          git pull --ff-only || true
+          git commit --allow-empty -m "Keepalive: scheduled touch [skip ci]"
+
+      - name: Safe push with simple retry
+        env:
+          MAX_RETRIES: 3
+        run: |
+          n=0
+          until [ "$n" -ge "$MAX_RETRIES" ]
+          do
+            if git push; then
+              echo "Pushed keepalive commit."
+              exit 0
+            fi
+            n=$((n+1))
+            echo "Push failed – attempt $n/$MAX_RETRIES. Rebasing and retrying..."
+            git pull --rebase || true
+            sleep 5
+          done
+          echo "Failed to push after $MAX_RETRIES attempts."
+          exit 1
